@@ -7,27 +7,30 @@
 
 namespace sfu {
 
+void NegotiateConnection(const std::shared_ptr<rtc::PeerConnection>& pc) {
+    if (pc->state() == rtc::PeerConnection::State::Connected || 
+        pc->state() == rtc::PeerConnection::State::New)
+    {
+        pc->setLocalDescription(rtc::Description::Type::Offer);
+    }
+}
+
 void Room::AddParticipant(ClientId newClientId, const std::shared_ptr<Participant>& participant) {
     for (auto& [id, other] : Participants_) {
-        auto audioTrack = other->GetAudioTrack();
-
-        if (!audioTrack) {
-            continue;
-        }
-
         std::cout << "Adding existing track from participant " << id << " to participant " << newClientId << std::endl;
-        
-        auto remoteTrack = participant->GetConnection()->addTrack(audioTrack->description());
+
+        auto remoteTrack = participant->GetConnection()->addTrack(other->GetAudioTrack()->description().reciprocate());
         other->AddRemoteTrack(newClientId, remoteTrack);
     }
 
     Participants_[newClientId] = participant;
+    NegotiateConnection(participant->GetConnection());
 }
 
-void Room::HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rtc::Track>& track) {
+void Room::HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rtc::Track>& recvTrack) {
     auto& participant = Participants_.at(clientId);
 
-    participant->SetAudioTrack(track);
+    participant->SetAudioTrack(recvTrack);
     for (auto& [id, other] : Participants_) {
         if (id == clientId) {
             continue;
@@ -35,8 +38,9 @@ void Room::HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rt
 
         std::cout << "Adding track from participant " << clientId << " to participant " << id << std::endl;
 
-        auto remoteTrack = other->GetConnection()->addTrack(track->description());
+        auto remoteTrack = other->GetConnection()->addTrack(recvTrack->description().reciprocate());
         participant->AddRemoteTrack(id, remoteTrack);
+        NegotiateConnection(other->GetConnection());
     }
 }
 
@@ -56,8 +60,8 @@ void Room::RemoveParticipant(ClientId clientId) {
 
         participant->RemoveRemoteTrack(clientId);
     }
-
     Participants_.at(clientId)->GetAudioTrack()->close();
+
     Participants_.erase(clientId);
 }
 

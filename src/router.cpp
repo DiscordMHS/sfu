@@ -23,8 +23,6 @@ struct Client {
     RoomId roomId;
     std::shared_ptr<rtc::WebSocket> ws;
     std::shared_ptr<rtc::PeerConnection> pc;
-
-    std::shared_ptr<rtc::Track> track;
 };
 
 Router::Router()
@@ -109,13 +107,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         const std::string type = *typeIt;
         std::cout << "[Client " << clientId << "] Received signaling: " << type << std::endl;
 
-        if (type == "offer") {
-            auto sdpIt = j.find("sdp");
-            if (sdpIt == j.end() || !sdpIt->is_string()) {
-                std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
-                return;
-            }
-
+        if (type == "join") {
             auto roomIdIt = j.find("room_id");
             if (roomIdIt == j.end() || !roomIdIt->is_string()) {
                 std::cerr << "[Client " << clientId << "] Offer missing room id" << std::endl;
@@ -124,7 +116,6 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
             
             // Update client state
             client->roomId = std::stoll(std::string{*roomIdIt});
-            std::string sdp = *sdpIt;
 
             if (!Rooms_.count(client->roomId)) {
                 Rooms_.emplace(client->roomId, Room{});
@@ -133,7 +124,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
             if (!client->pc) {
                 rtc::Configuration config;
                 config.disableAutoNegotiation = true;
-                config.forceMediaTransport = true;
+                //config.forceMediaTransport = true;
 
                 config.iceServers.emplace_back("stun:stun.l.google.com:19302");
                 
@@ -144,12 +135,13 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
                 client->pc->onLocalDescription([ws, clientId](const rtc::Description& desc) {
                     std::cout << "[Client " << clientId << "] Local description type: " << desc.typeString() << std::endl;
-                    
+                    std::cout << std::string{desc} << std::endl;
+
                     json answer = {
                         {"type", desc.typeString()},
-                        {"sdp", std::string(desc)}
+                        {"sdp", std::string{desc}}
                     };
-                    std::cout << "[Client " << clientId << "] Sending answer" << std::endl;
+                    std::cout << "[Client " << clientId << "] Sending local description" << std::endl;
                     ws->send(answer.dump());
                 });
 
@@ -177,37 +169,40 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                     ws->send(jcand.dump());
                 });
 
-                client->pc->onTrack([&, client, clientId](std::shared_ptr<rtc::Track> track) {
-                    auto session = std::make_shared<rtc::RtcpReceivingSession>();
-                    track->setMediaHandler(session);
-                    client->track = track;
-                });
+                rtc::Description::Audio recv("audio", rtc::Description::Direction::RecvOnly);
+                auto recvTrack = client->pc->addTrack(recv);
+                recvTrack->setMediaHandler(std::make_shared<rtc::RtcpReceivingSession>());
 
-                client->pc->onStateChange([this, client, clientId](rtc::PeerConnection::State state) {
-                    Loop_->EnqueueTask([this, client, clientId, state] {
+                client->pc->onStateChange([this, client, clientId, recvTrack](rtc::PeerConnection::State state) {
+                    Loop_->EnqueueTask([this, client, clientId, state, recvTrack] {
                         if (state == rtc::PeerConnection::State::Connected) {
                             if (Rooms_.at(client->roomId).HasParticipant(clientId)) {
                                 return;
                             }
 
-                            std::cout << "[Client " << clientId << "Connected" << "\n";
-
                             auto newParticipant = std::make_shared<Participant>(client->pc);
                             Rooms_.at(client->roomId).AddParticipant(clientId, newParticipant);
+
                             std::cout << "Handle track for client: " << clientId << "\n";
-                            Rooms_.at(client->roomId).HandleTrackForParticipant(clientId, client->track);
+                            Rooms_.at(client->roomId).HandleTrackForParticipant(clientId, recvTrack);
                         }
                     });
                 });
             }
+            client->pc->setLocalDescription(rtc::Description::Type::Offer);
 
-            std::cout << "[Client " << clientId << "] Processing offer..." << std::endl;
-            
-            client->pc->setRemoteDescription(rtc::Description(sdp, "offer"));
-            std::cout << "[Client " << clientId << "] Remote description set" << std::endl;
-            
-            client->pc->setLocalDescription();
-            std::cout << "[Client " << clientId << "] Local description set (answer will be generated)" << std::endl;
+            // std::cout << "[Client " << clientId << "] Remote description set" << std::endl;
+        }
+        else if (type == "answer") {
+            std::cout << "[Client " << clientId << "] Handling answer" << std::endl;
+            auto sdpIt = j.find("sdp");
+            if (sdpIt == j.end() || !sdpIt->is_string()) {
+                std::cerr << "[Client " << clientId << "] answer missing sdp" << std::endl;
+                return;
+            }
+
+            std::string sdp = *sdpIt;
+            client->pc->setRemoteDescription(rtc::Description(sdp, type));
         }
         else if (type == "candidate") {
             auto candIt = j.find("candidate");

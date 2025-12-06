@@ -28,6 +28,7 @@ public:
 
     void RemoveRemoteTrack(ClientId clientId) {
         std::lock_guard guard(TracksMutex_);
+        OutgoingTracks_.at(clientId)->close();
         OutgoingTracks_.erase(clientId);
     }
 
