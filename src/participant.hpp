@@ -2,11 +2,13 @@
 
 #include "fwd.hpp"
 #include "rtc/peerconnection.hpp"
+#include "loop.hpp"
 
 #include <rtc/description.hpp>
 #include <rtc/rtc.hpp>
 
 #include <memory>
+#include <shared_mutex>
 #include <unordered_map>
 
 namespace sfu {
@@ -22,12 +24,12 @@ public:
     void SetAudioTrack(const std::shared_ptr<rtc::Track>& track);
 
     void AddRemoteTrack(ClientId clientId, const std::shared_ptr<rtc::Track>& track) {
-        std::lock_guard guard(TracksMutex_);
+        std::unique_lock guard(TracksMutex_);
         OutgoingTracks_[clientId] = track;
     }
 
     void RemoveRemoteTrack(ClientId clientId) {
-        std::lock_guard guard(TracksMutex_);
+        std::unique_lock guard(TracksMutex_);
         OutgoingTracks_.erase(clientId);
     }
 
@@ -39,13 +41,13 @@ public:
         return PeerConnection_;
     }
 
-    std::unordered_map<ClientId, std::shared_ptr<rtc::Track>> OutgoingTracks_;
+    std::map<ClientId, std::shared_ptr<rtc::Track>> OutgoingTracks_;
 
 private:
     std::shared_ptr<rtc::Track> Track_;
     std::shared_ptr<rtc::PeerConnection> PeerConnection_;
 
-    std::mutex TracksMutex_;
+    std::shared_mutex TracksMutex_;
 };
 
 } // namespace sfu

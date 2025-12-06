@@ -10,10 +10,11 @@ void Participant::SetAudioTrack(const std::shared_ptr<rtc::Track>& track) {
     Track_ = track;
 
     Track_->onMessage([this](rtc::binary message) {
-        std::lock_guard<std::mutex> lock(TracksMutex_);
+        std::shared_lock lock(TracksMutex_);
         
         for (auto& [id, target] : OutgoingTracks_) {
             if (target->isOpen()) {
+                //std::cout << "Sending" << std::endl;
                 target->send(message);
             }
         }

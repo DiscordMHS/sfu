@@ -4,21 +4,25 @@
 
 #include <rtc/description.hpp>
 #include <rtc/rtc.hpp>
+#include <stdexcept>
 
 namespace sfu {
 
 void Room::AddParticipant(ClientId newClientId, const std::shared_ptr<Participant>& participant) {
+    bool needRenegotiate = false;
+
     for (auto& [id, other] : Participants_) {
-        auto audioTrack = other->GetAudioTrack();
-
-        if (!audioTrack) {
-            continue;
-        }
-
         std::cout << "Adding existing track from participant " << id << " to participant " << newClientId << std::endl;
-        
-        auto remoteTrack = participant->GetConnection()->addTrack(audioTrack->description());
+
+        rtc::Description::Audio descr("audio", rtc::Description::Direction::SendOnly);
+        descr.addOpusCodec(109);
+        auto remoteTrack = participant->GetConnection()->addTrack(descr);
+
         other->AddRemoteTrack(newClientId, remoteTrack);
+        needRenegotiate = true;
+    }
+    if (needRenegotiate) {
+        participant->GetConnection()->setLocalDescription(rtc::Description::Type::Offer);
     }
 
     Participants_[newClientId] = participant;
@@ -35,8 +39,12 @@ void Room::HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rt
 
         std::cout << "Adding track from participant " << clientId << " to participant " << id << std::endl;
 
-        auto remoteTrack = other->GetConnection()->addTrack(track->description());
+        rtc::Description::Audio descr("audio", rtc::Description::Direction::SendOnly);
+        descr.addOpusCodec(109);
+        auto remoteTrack = other->GetConnection()->addTrack(descr);
         participant->AddRemoteTrack(id, remoteTrack);
+
+        other->GetConnection()->setLocalDescription(rtc::Description::Type::Offer);
     }
 }
 

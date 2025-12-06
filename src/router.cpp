@@ -209,6 +209,14 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
             client->pc->setLocalDescription();
             std::cout << "[Client " << clientId << "] Local description set (answer will be generated)" << std::endl;
         }
+        else if (type == "answer") {
+            auto sdpIt = j.find("sdp");
+            if (sdpIt == j.end() || !sdpIt->is_string()) {
+                std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
+                return;
+            }
+            client->pc->setRemoteDescription(rtc::Description(std::string(*sdpIt), "answer"));
+        }
         else if (type == "candidate") {
             auto candIt = j.find("candidate");
             if (candIt == j.end() || !candIt->is_string()) {
