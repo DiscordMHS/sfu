@@ -72,7 +72,7 @@ function startConnection(url, localStream) {
 
     // --- STEP A: Add Mic Track BEFORE Offer ---
     localStream.getTracks().forEach(track => {
-        log(`➕ Added Mic Track to PC (ID: ${track.id.substring(0,5)}...)`);
+        log(`➕ Added Mic Track to PC (ID: ${track.id}...)`);
         pc.addTrack(track, localStream);
     });
 

@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>48k Opus Client</title>
+  <style>
+    body { font-family: 'Segoe UI', monospace; background: #1a1a1a; color: #eee; max-width: 600px; margin: 2em auto; }
+    .container { background: #2a2a2a; padding: 25px; border-radius: 8px; border: 1px solid #444; }
+    
+    .controls { display: flex; gap: 10px; margin-bottom: 20px; }
+    input { background: #333; border: 1px solid #555; color: white; padding: 8px; border-radius: 4px; }
+    
+    button { padding: 10px 20px; background: #008cff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    
+    #status { font-size: 13px; color: #888; margin-bottom: 15px; }
+    
+    #mix-engine { display: flex; flex-wrap: wrap; gap: 8px; }
+    .track-badge { background: #222; border: 1px solid #00ff9d; color: #00ff9d; padding: 5px 12px; border-radius: 20px; font-size: 12px; }
+    .track-badge.local { border-color: #008cff; color: #008cff; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <h3>🎧 48kHz / Opus 109 Mixer</h3>
+  <div id="status">Ready.</div>
+
+  <div class="controls">
+    <input id="wsurl" value="ws://127.0.0.1:8000" placeholder="WS URL">
+    <input id="roomid" value="1001" size="6" placeholder="Room ID">
+    <button id="connect">JOIN ROOM</button>
+  </div>
+  
+  <div id="mix-engine"></div>
+</div>
+
+<script>
+let pc, ws;
+let audioCtx;
+const remoteTracks = new Set(); 
+
+// --- 1. SETTING UP THE 48kHz MIXER ---
+async function initAudioEngine() {
+    // Force the AudioContext to run at 48000Hz to match Opus native rate
+    // This prevents the browser from doing heavy software resampling
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AudioContext({ 
+        sampleRate: 48000, 
+        latencyHint: 'interactive' 
+    });
+    
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    console.log(`🎵 Audio Engine Started: ${audioCtx.sampleRate}Hz`);
+}
+
+document.getElementById("connect").onclick = async () => {
+    document.getElementById("connect").disabled = true;
+    const url = document.getElementById("wsurl").value;
+
+    try {
+        await initAudioEngine();
+        
+        document.getElementById("status").innerText = "🎤 Acquiring 48k Mic...";
+        
+        // --- 2. GET MIC WITHOUT AUTO-GAIN (SAVES CPU) ---
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                sampleRate: 48000,      // Match context
+                channelCount: 1,        // Mono (Efficiency)
+                echoCancellation: true, // Necessary for speakers
+                noiseSuppression: true,
+                autoGainControl: false  // Disable to reduce CPU load/jitter
+            } 
+        });
+
+        // Visual indicator for local user
+        addVisualBadge("Me (Mic)", true);
+        startConnection(url, stream);
+
+    } catch (e) {
+        document.getElementById("status").innerText = "Error: " + e.message;
+        document.getElementById("connect").disabled = false;
+    }
+};
+
+function startConnection(url, localStream) {
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+        document.getElementById("status").innerText = "🔗 Connected via WebSocket";
+        
+        pc = new RTCPeerConnection({
+            iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        });
+
+        // Add Local Tracks
+        localStream.getTracks().forEach(track => {
+            pc.addTransceiver(track, { direction: 'sendonly', streams: [localStream] });
+        });
+
+        // --- 3. HIGH PERF INCOMING AUDIO HANDLING ---
+        pc.ontrack = (e) => {
+            const trackId = e.track.id;
+            if (remoteTracks.has(trackId)) return;
+            remoteTracks.add(trackId);
+
+            console.log("⚡ New Track via WebAudio API:", trackId);
+
+            // Connect MediaStream -> AudioContext -> Speakers
+            // No <audio> tags involved!
+            const source = audioCtx.createMediaStreamSource(e.streams[0]);
+            source.connect(audioCtx.destination);
+
+            const badge = addVisualBadge(`User ${trackId.substring(0,4)}`, false);
+
+            e.track.onended = () => {
+                badge.remove();
+                remoteTracks.delete(trackId);
+            };
+        };
+
+        // Standard Negotiation
+        pc.onnegotiationneeded = async () => {
+            if(pc.signalingState !== "stable") return;
+            const offer = await pc.createOffer();
+            // Apply SDP Fixes exactly like browser-to-browser
+            const mungedSDP = modifySDP(offer.sdp); 
+            await pc.setLocalDescription({type: "offer", sdp: mungedSDP});
+            
+            ws.send(JSON.stringify({
+                type: "offer",
+                room_id: document.getElementById("roomid").value,
+                sdp: pc.localDescription.sdp
+            }));
+        };
+
+        pc.onicecandidate = ({candidate}) => {
+            if (candidate) ws.send(JSON.stringify({ type: "candidate", candidate: candidate.candidate, sdpMid: candidate.sdpMid }));
+        };
+    };
+
+    ws.onmessage = async (msg) => {
+        const data = JSON.parse(msg.data);
+
+        if (data.type === "answer") {
+            await pc.setRemoteDescription(data);
+        } 
+        else if (data.type === "offer") {
+            await pc.setRemoteDescription(data);
+            const answer = await pc.createAnswer();
+            
+            // --- 4. APPLY SDP CODEC HACKS HERE ---
+            const fixedSDP = modifySDP(answer.sdp);
+            
+            const finalAnswer = { type: answer.type, sdp: fixedSDP };
+            await pc.setLocalDescription(finalAnswer);
+            ws.send(JSON.stringify(finalAnswer));
+        } 
+        else if (data.type === "candidate") {
+            if (pc.remoteDescription) await pc.addIceCandidate(data);
+        }
+    };
+}
+
+// --- 5. THE MAGIC: SDP MUNGING FOR OPUS 109 & DTX ---
+function modifySDP(sdp) {
+    let newSdp = sdp;
+
+    // A. Fix Firefox/Chrome Role Compatibility
+    if (newSdp.includes("a=setup:active")) {
+        newSdp = newSdp.replace(/a=setup:active/g, "a=setup:passive");
+    }
+
+    // B. Enable DTX (Silence Suppression) 
+    // This stops jitter when 3 people are connected but silence exists
+    // Also sets opus-specific params
+    newSdp = newSdp.split('\n').map(line => {
+        if (line.includes("a=fmtp:111") || line.includes("a=fmtp:109")) {
+            // Check if it's opus loop (usually 111 in chrome, we treat it same)
+            if (line.includes("minptime")) {
+                // FORCE: usedtx=1 (Silence Suppression)
+                // FORCE: maxaveragebitrate=48000 (Prevents massive spikes)
+                // FORCE: stereo=0 (We only want mono for voice)
+                return line + ";usedtx=1;useinbandfec=1;maxaveragebitrate=48000;stereo=0";
+            }
+        }
+        return line;
+    }).join('\n');
+
+    /** 
+     * OPTIONAL: Force Payload Type 109 
+     * Chrome usually defaults Opus to 111. If you strictly need "109",
+     * we literally text-replace 111 -> 109.
+     * WARNING: Only use this if your server strictly dies on 111.
+     */
+     newSdp = newSdp.replace(/a=rtpmap:111 opus/g, "a=rtpmap:109 opus");
+     newSdp = newSdp.replace(/a=fmtp:111/g, "a=fmtp:109");
+
+    return newSdp;
+}
+
+// UI Helper
+function addVisualBadge(name, isLocal) {
+    const d = document.createElement("div");
+    d.className = isLocal ? "track-badge local" : "track-badge";
+    d.innerText = name;
+    document.getElementById("mix-engine").appendChild(d);
+    return d;
+}
+</script>
+</body>
+</html>
