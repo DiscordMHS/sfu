@@ -183,6 +183,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
                 client->pc->onLocalDescription([ws, client, clientId](const rtc::Description& desc) {
                     std::cout << "[Client " << clientId << "] Local description type: " << desc.typeString() << std::endl;
+                    std::cout << std::string(desc) << "\n";
                     
                     json answer = {
                         {"type", desc.typeString()},
