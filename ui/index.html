@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Voice Client</title>
+  <style>
+    body { font-family: monospace; max-width: 600px; margin: 2rem auto; background: #eee; }
+    .card { background: white; padding: 20px; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    input { display: block; width: 95%; margin-bottom: 10px; padding: 8px; font-family: monospace; }
+    button { padding: 10px 20px; background: #333; color: white; border: none; cursor: pointer; }
+    button:disabled { background: #999; }
+    #status { margin-top: 10px; font-weight: bold; }
+    .log-box { background: #fff; border: 1px solid #ccc; height: 150px; overflow-y: auto; padding: 5px; margin-top: 15px; font-size: 11px; }
+    .error { color: red; }
+    .success { color: green; }
+    audio { display: none; } /* Audio plays in background */
+  </style>
+</head>
+<body>
+
+<div class="card">
+    <h3>Voice Client</h3>
+    
+    <label>WebSocket URL</label>
+    <input type="text" id="wsUrl" value="ws://127.0.0.1:8000">
+
+    <label>JWT Token</label>
+    <input type="text" id="jwtToken" placeholder="Paste token string">
+
+    <button id="btnJoin">Join Room</button>
+    <button id="btnLeave" disabled>Disconnect</button>
+
+    <div id="status">Ready</div>
+    <div id="remote-tracks"></div>
+    <div class="log-box" id="logs"></div>
+</div>
+
+<script type="module">
+    import { VoiceClient } from './voice-lib.js';
+
+    const btnJoin = document.getElementById("btnJoin");
+    const btnLeave = document.getElementById("btnLeave");
+    const statusDiv = document.getElementById("status");
+    const logDiv = document.getElementById("logs");
+    const tracksDiv = document.getElementById("remote-tracks");
+
+    let client = null;
+
+    // UI Logger
+    function log(msg) {
+        logDiv.innerText += msg + "\n";
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    btnJoin.onclick = async () => {
+        const url = document.getElementById("wsUrl").value;
+        const token = document.getElementById("jwtToken").value;
+
+        // Reset UI
+        statusDiv.innerText = "Connecting...";
+        statusDiv.className = "";
+        btnJoin.disabled = true;
+        logDiv.innerText = ""; // Clear logs
+        tracksDiv.innerHTML = ""; // Clear tracks
+
+        // Init Library
+        client = new VoiceClient({
+            onLog: log,
+            // Handle incoming audio
+            onTrack: (stream, id) => {
+                const el = document.createElement("div");
+                el.innerText = `Running Audio Track: ${id}`;
+                const audio = document.createElement("audio");
+                audio.srcObject = stream;
+                audio.autoplay = true;
+                el.appendChild(audio);
+                tracksDiv.appendChild(el);
+            },
+            // Handle unexpected disconnects
+            onDisconnect: () => {
+                statusDiv.innerText = "Disconnected";
+                statusDiv.className = "";
+                btnJoin.disabled = false;
+                btnLeave.disabled = true;
+            }
+        });
+
+        try {
+            // --- CONNECT HERE --- 
+            await client.join(url, token);
+            
+            statusDiv.innerText = "Connected (Live)";
+            statusDiv.className = "success";
+            btnLeave.disabled = false;
+
+        } catch (error) {
+            // --- HANDLE FAILURE ---
+            console.error(error);
+            statusDiv.innerText = "Error: " + error.message;
+            statusDiv.className = "error";
+            btnJoin.disabled = false;
+        }
+    };
+
+    btnLeave.onclick = () => {
+        if(client) client.disconnect();
+        btnJoin.disabled = false;
+        btnLeave.disabled = true;
+        statusDiv.innerText = "Disconnected";
+    };
+</script>
+
+</body>
+</html>

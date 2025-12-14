@@ -2,34 +2,79 @@
 
 #include "loop.hpp"
 #include "participant.hpp"
+#include "utils.hpp"
 
 #include <rtc/description.hpp>
 #include <rtc/rtc.hpp>
+
+#include "external/jwt-cpp/include/jwt-cpp/jwt.h"
 
 #include <nlohmann/json.hpp>
 
 #include <memory>
 #include <thread>
+#include <chrono>
 
 namespace sfu {
+
+struct Client {
+    std::optional<RoomId> roomId;
+    std::shared_ptr<rtc::WebSocket> ws;
+    std::shared_ptr<rtc::PeerConnection> pc;
+    std::string ErrorMessage;
+
+    std::shared_ptr<rtc::Track> track;
+};
 
 namespace {
 
 using json = nlohmann::json;
 
+std::optional<std::tuple<uint64_t, uint64_t>> ValidateOffer(const json& offer, std::shared_ptr<Client> client, const std::string& publicKey) {
+    if (!offer.contains("token")) {
+        client->ErrorMessage = "Offer doesn't contain token";
+        return {};
+    }
+
+    try {
+        auto decoded = jwt::decode(offer.at("token"));
+
+        auto verifier = jwt::verify()
+            .allow_algorithm(jwt::algorithm::rs256(publicKey, "", "", ""));
+
+        verifier.verify(decoded);
+
+        if (!decoded.has_payload_claim("room")) {
+            client->ErrorMessage = "Offer doesn't contain room";
+            return {};
+        }
+        
+        if (!decoded.has_payload_claim("user_id")) {
+            client->ErrorMessage = "Offer doesn't contain user_id";
+            return {};
+        }
+
+        return std::make_tuple(decoded.get_payload_claim("user_id").as_integer(), decoded.get_payload_claim("room").as_integer());
+    } catch (const jwt::error::token_verification_exception& ex) {
+        client->ErrorMessage  = (std::string("Verification failed: ") + ex.what());
+    } catch (const std::exception& ex) {
+        client->ErrorMessage  = ex.what();
+    }
+   
+    return {};
+}
+
 } // namespace
-
-struct Client {
-    RoomId roomId;
-    std::shared_ptr<rtc::WebSocket> ws;
-    std::shared_ptr<rtc::PeerConnection> pc;
-
-    std::shared_ptr<rtc::Track> track;
-};
 
 Router::Router()
     : Loop_(std::make_shared<Loop>())
-{ }
+{
+    PublicKey_ = ReadPemFile("data/public.pem");
+    if (PublicKey_.empty()) {
+        std::cerr << "Public key is empty!" << "\n";
+        exit(1);
+    }
+}
 
 void Router::WsOpenCallback(std::shared_ptr<rtc::WebSocket> ws) {
     Loop_->EnqueueTask([this, ws = std::move(ws)]
@@ -61,7 +106,9 @@ void Router::WsClosedCallback(std::shared_ptr<rtc::WebSocket> ws) {
 
         if (clientToClose) {
             std::cout << "[Client " << idToClose << "] WebSocket disconnected" << std::endl;
-            Rooms_.at(clientToClose->roomId).RemoveParticipant(idToClose);
+            if (clientToClose->roomId) {
+                Rooms_.at(*clientToClose->roomId).RemoveParticipant(idToClose);
+            }
 
             if (clientToClose->pc) {
                 clientToClose->pc->close();
@@ -97,12 +144,14 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         }
         if (!client) {
             std::cerr << "Client not found for signaling message" << std::endl;
+            ws->close();
             return;
         }
 
         auto typeIt = j.find("type");
         if (typeIt == j.end() || !typeIt->is_string()) {
             std::cerr << "[Client " << clientId << "] Signaling message missing type" << std::endl;
+            ws->close();
             return;
         }
 
@@ -110,25 +159,14 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         std::cout << "[Client " << clientId << "] Received signaling: " << type << std::endl;
 
         if (type == "offer") {
-            auto sdpIt = j.find("sdp");
-            if (sdpIt == j.end() || !sdpIt->is_string()) {
+            auto validationResult = ValidateOffer(j, client, PublicKey_);
+
+            if (!j.contains("sdp")) {
                 std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
+                ws->close();
                 return;
             }
-
-            auto roomIdIt = j.find("room_id");
-            if (roomIdIt == j.end() || !roomIdIt->is_string()) {
-                std::cerr << "[Client " << clientId << "] Offer missing room id" << std::endl;
-                return;
-            }
-            
-            // Update client state
-            client->roomId = std::stoll(std::string{*roomIdIt});
-            std::string sdp = *sdpIt;
-
-            if (!Rooms_.count(client->roomId)) {
-                Rooms_.emplace(client->roomId, Room{});
-            }
+            std::string sdp = j.at("sdp");
 
             if (!client->pc) {
                 rtc::Configuration config;
@@ -140,18 +178,29 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                 std::cout << "[Client " << clientId << "] Creating PeerConnection" << std::endl;
                 client->pc = std::make_shared<rtc::PeerConnection>(config);
 
-                std::cout << "Added new participant " << clientId << " to a room " << client->roomId << "\n";
-
-                client->pc->onLocalDescription([ws, clientId](const rtc::Description& desc) {
+                client->pc->onLocalDescription([ws, client, clientId](const rtc::Description& desc) {
                     std::cout << "[Client " << clientId << "] Local description type: " << desc.typeString() << std::endl;
                     
                     json answer = {
                         {"type", desc.typeString()},
                         {"sdp", std::string(desc)}
                     };
+                    if (!client->ErrorMessage.empty()) {
+                        answer["error"] = client->ErrorMessage;
+                    }
+
                     std::cout << "[Client " << clientId << "] Sending answer" << std::endl;
                     ws->send(answer.dump());
+                    if (!client->ErrorMessage.empty()) {
+                        std::cerr << client->ErrorMessage << "\n";
+                        ws->close();
+                    }
                 });
+
+                if (!client->ErrorMessage.empty()) {
+                    client->pc->setRemoteDescription(rtc::Description(sdp, "offer"));
+                    client->pc->setLocalDescription();
+                }
 
                 client->pc->onLocalCandidate([ws, clientId](const rtc::Candidate& cand) {
                     auto candidate = cand.candidate();
@@ -186,19 +235,25 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                 client->pc->onStateChange([this, client, clientId](rtc::PeerConnection::State state) {
                     Loop_->EnqueueTask([this, client, clientId, state] {
                         if (state == rtc::PeerConnection::State::Connected) {
-                            if (Rooms_.at(client->roomId).HasParticipant(clientId)) {
+                            if (Rooms_.at(*client->roomId).HasParticipant(clientId)) {
                                 return;
                             }
 
-                            std::cout << "[Client " << clientId << "Connected" << "\n";
+                            std::cout << "[Client " << clientId << "Connected to room: " << *client->roomId << "\n";
 
                             auto newParticipant = std::make_shared<Participant>(client->pc);
-                            Rooms_.at(client->roomId).AddParticipant(clientId, newParticipant);
+                            Rooms_.at(*client->roomId).AddParticipant(clientId, newParticipant);
                             std::cout << "Handle track for client: " << clientId << "\n";
-                            Rooms_.at(client->roomId).HandleTrackForParticipant(clientId, client->track);
+                            Rooms_.at(*client->roomId).HandleTrackForParticipant(clientId, client->track);
                         }
                     });
                 });
+            }
+
+            auto [_, roomId] = *validationResult;
+            client->roomId = roomId;
+            if (!Rooms_.count(*client->roomId)) {
+                Rooms_.emplace(*client->roomId, Room{});
             }
 
             std::cout << "[Client " << clientId << "] Processing offer..." << std::endl;

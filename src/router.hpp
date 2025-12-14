@@ -24,6 +24,7 @@ private:
     void WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::message_variant&& message);
 
 private:
+    std::string PublicKey_;
     std::atomic_uint64_t IdGenerator_{1};
     std::unordered_map<ClientId, std::shared_ptr<Client>> Clients_;
 
