@@ -315,8 +315,10 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
 void Router::Run() {
     rtc::WebSocketServer::Configuration wsCfg;
-    wsCfg.port = 8000;
-    wsCfg.enableTls = false;
+    wsCfg.port = 8443;
+    wsCfg.enableTls = true;
+    wsCfg.certificatePemFile = "data/localhost+1.pem";
+    wsCfg.keyPemFile = "data/localhost+1-key.pem";
 
     std::thread t{std::bind(&Loop::Run, Loop_)};
 

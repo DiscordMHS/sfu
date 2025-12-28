@@ -49,7 +49,7 @@ WORKDIR /app
 # Copy the binary from the builder stage
 COPY --from=builder /app/build/sfu_server .
 
-COPY --from=builder /app/data/public.pem /app/data/
+COPY --from=builder /app/data/ /app/data/
 
 RUN ls
 
