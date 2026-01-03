@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <memory>
+#include <stdexcept>
 #include <thread>
 #include <chrono>
 
@@ -172,6 +173,8 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                 rtc::Configuration config;
                 config.disableAutoNegotiation = true;
                 config.forceMediaTransport = true;
+                config.portRangeBegin = 50001;
+                config.portRangeEnd = 50005;
 
                 config.iceServers.emplace_back("stun:stun.l.google.com:19302");
                 
@@ -315,10 +318,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
 void Router::Run() {
     rtc::WebSocketServer::Configuration wsCfg;
-    wsCfg.port = 8443;
-    wsCfg.enableTls = true;
-    wsCfg.certificatePemFile = "data/localhost+1.pem";
-    wsCfg.keyPemFile = "data/localhost+1-key.pem";
+    wsCfg.port = 8000;
 
     std::thread t{std::bind(&Loop::Run, Loop_)};
 

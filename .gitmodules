@@ -1,6 +1,8 @@
 [submodule "src/external/jwt-cpp"]
 	path = src/external/jwt-cpp
 	url = https://github.com/Thalhammer/jwt-cpp.git
+	ignore = dirty
 [submodule "src/external/libdatachannel"]
 	path = src/external/libdatachannel
 	url = https://github.com/paullouisageneau/libdatachannel.git
+	ignore = dirty
