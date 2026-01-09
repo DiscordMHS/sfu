@@ -19,7 +19,7 @@ using ClientId = uint64_t;
 
 class Participant {
 public:
-    Participant(const std::shared_ptr<rtc::PeerConnection>& peerConnection);
+    Participant(const std::shared_ptr<rtc::PeerConnection>& peerConnection, ClientId clientId);
 
     void SetAudioTrack(const std::shared_ptr<rtc::Track>& track);
 
@@ -37,6 +37,10 @@ public:
         return Track_;
     }
 
+    ClientId GetClientId() {
+        return ClientId_;
+    }
+
     std::shared_ptr<rtc::PeerConnection> GetConnection() {
         return PeerConnection_;
     }
@@ -46,6 +50,8 @@ public:
 private:
     std::shared_ptr<rtc::Track> Track_;
     std::shared_ptr<rtc::PeerConnection> PeerConnection_;
+
+    ClientId ClientId_;
 
     std::shared_mutex TracksMutex_;
 };

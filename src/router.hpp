@@ -28,7 +28,7 @@ private:
     std::atomic_uint64_t IdGenerator_{1};
     std::unordered_map<ClientId, std::shared_ptr<Client>> Clients_;
 
-    std::unordered_map<RoomId, Room> Rooms_;
+    std::map<RoomId, Room> Rooms_;
     std::shared_ptr<Loop> Loop_;
 };
 

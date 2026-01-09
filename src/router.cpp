@@ -183,8 +183,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
                 client->pc->onLocalDescription([ws, client, clientId](const rtc::Description& desc) {
                     std::cout << "[Client " << clientId << "] Local description type: " << desc.typeString() << std::endl;
-                    std::cout << std::string(desc) << "\n";
-                    
+
                     json answer = {
                         {"type", desc.typeString()},
                         {"sdp", std::string(desc)}
@@ -231,9 +230,11 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                 });
 
                 client->pc->onTrack([&, client, clientId](std::shared_ptr<rtc::Track> track) {
-                    auto session = std::make_shared<rtc::RtcpReceivingSession>();
-                    track->setMediaHandler(session);
-                    client->track = track;
+                    Loop_->EnqueueTask([this, client, clientId, track] {
+                        auto session = std::make_shared<rtc::RtcpReceivingSession>();
+                        track->setMediaHandler(session);
+                        client->track = track;
+                    });
                 });
 
                 client->pc->onStateChange([this, client, clientId](rtc::PeerConnection::State state) {
@@ -245,7 +246,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
                             std::cout << "[Client " << clientId << "Connected to room: " << *client->roomId << "\n";
 
-                            auto newParticipant = std::make_shared<Participant>(client->pc);
+                            auto newParticipant = std::make_shared<Participant>(client->pc, clientId);
                             Rooms_.at(*client->roomId).AddParticipant(clientId, newParticipant);
                             std::cout << "Handle track for client: " << clientId << "\n";
                             Rooms_.at(*client->roomId).HandleTrackForParticipant(clientId, client->track);
@@ -306,7 +307,6 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         }
         else if (type == "endOfCandidates") {
             std::cout << "[Client " << clientId << "] Client finished sending candidates" << std::endl;
-            // Don't need to add empty candidate - libdatachannel handles this automatically
         }
         else if (type == "ping") {
             ws->send(json({{"type","pong"}}).dump());
