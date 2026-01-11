@@ -26,7 +26,7 @@ private:
 private:
     std::string PublicKey_;
     std::atomic_uint64_t IdGenerator_{1};
-    std::unordered_map<ClientId, std::shared_ptr<Client>> Clients_;
+    std::set<std::shared_ptr<Client>> Clients_;
 
     std::map<RoomId, Room> Rooms_;
     std::shared_ptr<Loop> Loop_;

@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <unordered_map>
+#include <span>
 
 namespace sfu {
 
@@ -25,9 +26,18 @@ public:
         return Participants_.count(clientId);
     }
 
-    void HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rtc::Track>& track);
+    const auto& GetParticipants() {
+        return Participants_;
+    } 
+
+    void HandleTracksForParticipant(ClientId clientId, const std::array<std::shared_ptr<rtc::Track>, 2> tracks);
 
 private:
+    uint64_t GetUniqueId() {
+        return UniqueIdGenerator_++;
+    }
+
+    std::atomic<uint64_t> UniqueIdGenerator_ = 150;
     std::unordered_map<ClientId, std::shared_ptr<Participant>> Participants_;
 };
 

@@ -1,113 +1,258 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Voice Client</title>
+  <meta charset="utf-8" />
+  <title>Voice+Video Client</title>
   <style>
-    body { font-family: monospace; max-width: 600px; margin: 2rem auto; background: #eee; }
-    .card { background: white; padding: 20px; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+    body { font-family: monospace; max-width: 1100px; margin: 2rem auto; background: #eee; }
+    .card { background: white; padding: 20px; border-radius: 4px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 15px; }
     input { display: block; width: 95%; margin-bottom: 10px; padding: 8px; font-family: monospace; }
-    button { padding: 10px 20px; background: #333; color: white; border: none; cursor: pointer; }
-    button:disabled { background: #999; }
-    #status { margin-top: 10px; font-weight: bold; }
-    .log-box { background: #fff; border: 1px solid #ccc; height: 150px; overflow-y: auto; padding: 5px; margin-top: 15px; font-size: 11px; }
-    .error { color: red; }
-    .success { color: green; }
-    audio { display: none; } /* Audio plays in background */
+    button { padding: 10px 16px; cursor: pointer; margin-right: 8px; margin-top: 6px; min-width: 120px;}
+    button:disabled { cursor: not-allowed; opacity: 0.6; }
+    .active-btn { background-color: #ffcccc; border-color: red; } 
+    
+    .log-box { background: #fff; border: 1px solid #ccc; height: 170px; overflow-y: auto; padding: 5px; margin-top: 15px; font-size: 11px; white-space: pre-wrap; }
+    
+    .track { margin-top: 10px; padding: 8px; background: #fafafa; border: 1px solid #ddd; }
+    
+    /* Video Container Logic */
+    .track-container { position: relative; width: 100%; max-height: 340px; background: #000; overflow: hidden; }
+    
+    video { width: 100%; height: 100%; object-fit: contain; transition: opacity 0.3s; display: block; pointer-events: none; }
+    
+    /* 
+       INACTIVE STATE:
+       - Video is completely transparent (opacity: 0).
+       - Avatar/Placeholder text is visible.
+    */
+    .video-muted video { opacity: 0; }
+    
+    .avatar-placeholder {
+        position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+        display: flex; align-items: center; justify-content: center; flex-direction: column;
+        background: #333; color: white; font-size: 16px;
+        opacity: 0; transition: opacity 0.3s; pointer-events: none;
+    }
+    
+    .video-muted .avatar-placeholder { opacity: 1; }
   </style>
 </head>
 <body>
 
 <div class="card">
-    <h3>Voice Client</h3>
-    
-    <label>WebSocket URL</label>
-    <input type="text" id="wsUrl" value="ws://127.0.0.1:8000">
+  <h3>🎥 Client</h3>
 
-    <label>JWT Token</label>
-    <input type="text" id="jwtToken" placeholder="Paste token string">
+  <label>WebSocket URL</label>
+  <input type="text" id="wsUrl" value="ws://127.0.0.1:8000">
 
-    <button id="btnJoin">Join Room</button>
-    <button id="btnLeave" disabled>Disconnect</button>
+  <label>JWT Token</label>
+  <input type="text" id="jwtToken" placeholder="Paste token string">
 
-    <div id="status">Ready</div>
-    <div id="remote-tracks"></div>
-    <div class="log-box" id="logs"></div>
+  <button id="btnJoin">Join Room</button>
+  <button id="btnLeave" disabled>Disconnect</button>
+  <hr/>
+  <button id="btnCam" disabled>Start Camera</button>
+  <button id="btnScreen" disabled>Start Screen</button>
+
+  <div id="status" style="margin-top:10px; font-weight:bold;">Ready</div>
+  <div style="margin-top:10px; font-size: 12px;"><b>Local Mode:</b> <span id="loc-mode">None</span></div>
+</div>
+
+<div class="card">
+  <h4>Remote Tracks</h4>
+  <div id="remote-tracks"></div>
+</div>
+
+<div class="card">
+  <h4>Log</h4>
+  <div class="log-box" id="logs"></div>
 </div>
 
 <script type="module">
-    import { VoiceClient } from './voice-lib.js';
+  import { VoiceClient } from './voice-lib.js';
 
-    const btnJoin = document.getElementById("btnJoin");
-    const btnLeave = document.getElementById("btnLeave");
-    const statusDiv = document.getElementById("status");
-    const logDiv = document.getElementById("logs");
-    const tracksDiv = document.getElementById("remote-tracks");
+  const btnJoin = document.getElementById("btnJoin");
+  const btnLeave = document.getElementById("btnLeave");
+  const btnCam = document.getElementById("btnCam");
+  const btnScreen = document.getElementById("btnScreen");
+  const locModeSpan = document.getElementById("loc-mode");
+  const statusDiv = document.getElementById("status");
+  const tracksDiv = document.getElementById("remote-tracks");
+  const logs = document.getElementById("logs");
 
-    let client = null;
+  let client = null;
 
-    // UI Logger
-    function log(msg) {
-        logDiv.innerText += msg + "\n";
-        logDiv.scrollTop = logDiv.scrollHeight;
+  function logLine(msg) {
+    logs.textContent += msg + "\n";
+    logs.scrollTop = logs.scrollHeight;
+  }
+
+  function updateButtons() {
+    if (!client) {
+        btnCam.textContent = "Start Camera"; btnCam.classList.remove("active-btn");
+        btnScreen.textContent = "Start Screen"; btnScreen.classList.remove("active-btn");
+        locModeSpan.textContent = "None";
+        return;
+    }
+    
+    locModeSpan.textContent = client.videoMode.toUpperCase();
+
+    if (client.videoMode === 'camera') {
+        btnCam.textContent = "Stop Camera"; btnCam.classList.add("active-btn");
+    } else {
+        btnCam.textContent = "Start Camera"; btnCam.classList.remove("active-btn");
     }
 
-    btnJoin.onclick = async () => {
-        const url = document.getElementById("wsUrl").value;
-        const token = document.getElementById("jwtToken").value;
+    if (client.videoMode === 'screen') {
+        btnScreen.textContent = "Stop Screen"; btnScreen.classList.add("active-btn");
+    } else {
+        btnScreen.textContent = "Start Screen"; btnScreen.classList.remove("active-btn");
+    }
+  }
 
-        // Reset UI
-        statusDiv.innerText = "Connecting...";
-        statusDiv.className = "";
-        btnJoin.disabled = true;
-        logDiv.innerText = ""; // Clear logs
-        tracksDiv.innerHTML = ""; // Clear tracks
+  // --- UPDATED: SSRC LOOKUP WITH RETRY ---
+  async function handleRemoteMode(data) {
+    const { ssrc, active } = data;
+    if (!client || !client.pc) return;
 
-        // Init Library
-        client = new VoiceClient({
-            onLog: log,
-            // Handle incoming audio
-            onTrack: (stream, id) => {
-                const el = document.createElement("div");
-                el.innerText = `Running Audio Track: ${id}`;
-                const audio = document.createElement("audio");
-                audio.srcObject = stream;
-                audio.autoplay = true;
-                el.appendChild(audio);
-                tracksDiv.appendChild(el);
-            },
-            // Handle unexpected disconnects
-            onDisconnect: () => {
-                statusDiv.innerText = "Disconnected";
-                statusDiv.className = "";
-                btnJoin.disabled = false;
-                btnLeave.disabled = true;
-            }
-        });
-
+    const findVideoBySSRC = async (attempts = 5) => {
         try {
-            // --- CONNECT HERE --- 
-            await client.join(url, token);
-            
-            statusDiv.innerText = "Connected (Live)";
-            statusDiv.className = "success";
-            btnLeave.disabled = false;
+            const stats = await client.pc.getStats();
+            for (const report of stats.values()) {
+                if (report.type === 'inbound-rtp' && report.kind === 'video' && report.ssrc == ssrc) {
+                    return report.trackIdentifier; // Found it!
+                }
+            }
+        } catch(e) {}
 
-        } catch (error) {
-            // --- HANDLE FAILURE ---
-            console.error(error);
-            statusDiv.innerText = "Error: " + error.message;
-            statusDiv.className = "error";
-            btnJoin.disabled = false;
+        if (attempts > 0) {
+            // Wait 500ms and try again (RTP packet might not have arrived yet)
+            await new Promise(r => setTimeout(r, 500));
+            return findVideoBySSRC(attempts - 1);
         }
+        return null;
     };
 
-    btnLeave.onclick = () => {
-        if(client) client.disconnect();
+    const targetTrackId = await findVideoBySSRC();
+
+    if (!targetTrackId) {
+        logLine(`[Warn] Could not match SSRC ${ssrc} to a UI element.`);
+        return;
+    }
+
+    // Note: In addRemote, we set ID as `remote-video-{trackId}`
+    const elementId = `remote-video-${targetTrackId}`;
+    const wrapper = document.getElementById(elementId);
+
+    if (wrapper) {
+        if (active) {
+            wrapper.classList.remove('video-muted'); // Shows Video
+        } else {
+            wrapper.classList.add('video-muted'); // Hides Video (Opacity 0), Shows Avatar
+        }
+    }
+  }
+
+  function removeRemote(kind, trackId) {
+    const id = `remote-${kind}-${trackId}`;
+    const el = document.getElementById(id);
+    if (el) el.remove();
+  }
+
+  function addRemote(kind, mid, trackId, stream) {
+    const id = `remote-${kind}-${trackId}`;
+    if (document.getElementById(id)) return;
+
+    const wrap = document.createElement("div");
+    wrap.className = "track";
+    wrap.id = id;
+    
+    // !!! IMPORTANT: Start Muted (Inactive/Hidden) by default
+    if (kind === 'video') wrap.classList.add('video-muted');
+
+    const container = document.createElement("div");
+    container.className = "track-container";
+
+    if (kind === "video") {
+      // Used for looking up DOM element by track ID later
+      wrap.id = `remote-video-${trackId}`;
+
+      const av = document.createElement("div");
+      av.className = "avatar-placeholder";
+      av.innerHTML = "<span>NO VIDEO</span>";
+      container.appendChild(av);
+
+      const v = document.createElement("video");
+      v.autoplay = true;
+      v.playsInline = true;
+      v.controls = false; 
+      v.srcObject = stream;
+      container.appendChild(v);
+    } else {
+      const a = document.createElement("audio");
+      a.autoplay = true;
+      a.controls = false;
+      a.srcObject = stream;
+      container.appendChild(a);
+    }
+    
+    wrap.appendChild(container);
+    
+    if (kind === 'video') {
+        const info = document.createElement("div");
+        info.style.fontSize = "10px"; info.style.padding = "4px"; info.style.color = "#888"; 
+        info.textContent = `id:${trackId.substring(0,6)}...`;
+        wrap.appendChild(info);
+    }
+    
+    tracksDiv.appendChild(wrap);
+  }
+
+  btnJoin.onclick = async () => {
+    const url = document.getElementById("wsUrl").value.trim();
+    const token = document.getElementById("jwtToken").value.trim();
+
+    statusDiv.textContent = "Connecting...";
+    tracksDiv.innerHTML = "";
+    logs.textContent = "";
+
+    client = new VoiceClient({
+      onLog: logLine,
+      videoMaxBitrateKbps: 3000,
+      
+      onTrack: (stream, info) => addRemote(info.kind, info.mid, info.track.id, stream),
+      onTrackEnded: (info) => removeRemote(info.kind, info.track.id),
+      onRemoteMode: (data) => handleRemoteMode(data),
+
+      onDisconnect: () => {
+        statusDiv.textContent = "Disconnected";
+        tracksDiv.innerHTML = ""; 
         btnJoin.disabled = false;
         btnLeave.disabled = true;
-        statusDiv.innerText = "Disconnected";
-    };
+        btnCam.disabled = true;
+        btnScreen.disabled = true;
+        client = null;
+        updateButtons();
+      },
+    });
+
+    try {
+      await client.join(url, token);
+      statusDiv.textContent = "Connected (Voice Only)";
+      btnJoin.disabled = true;
+      btnLeave.disabled = false;
+      btnCam.disabled = false;
+      btnScreen.disabled = false;
+    } catch (e) {
+      statusDiv.textContent = "Error: " + e.message;
+      btnJoin.disabled = false;
+      console.error(e);
+    }
+  };
+
+  btnLeave.onclick = () => { if (client) client.disconnect(); };
+  btnCam.onclick = async () => { if(client) { if(client.videoMode==='camera') await client.stopCamera(); else await client.startCamera(); updateButtons(); }};
+  btnScreen.onclick = async () => { if(client) { if(client.videoMode==='screen') await client.stopScreenShare(); else await client.startScreenShare(); updateButtons(); }};
 </script>
 
 </body>

@@ -1,6 +1,7 @@
 #include "room.hpp"
 
 #include "loop.hpp"
+#include "participant.hpp"
 #include "rtc/peerconnection.hpp"
 
 #include <rtc/description.hpp>
@@ -12,7 +13,6 @@ namespace sfu {
 
 void Room::AddParticipant(ClientId newClientId, const std::shared_ptr<Participant>& participant) {
     Participants_[newClientId] = participant;
-    //return;
 
     for (auto [id, other] : Participants_) {
         if (id == newClientId) {
@@ -21,34 +21,52 @@ void Room::AddParticipant(ClientId newClientId, const std::shared_ptr<Participan
 
         std::cout << "Adding existing track from participant " << id << " to participant " << newClientId << std::endl;
 
-        rtc::Description::Audio descr(std::to_string(id * 10000 + newClientId), rtc::Description::Direction::SendOnly);
-        descr.addSSRC(id, {}, {});
-        descr.addOpusCodec(109);
-        auto remoteTrack = participant->GetConnection()->addTrack(descr);
+        rtc::Description::Audio audioDescr(std::to_string(GetUniqueId()), rtc::Description::Direction::SendOnly);
+        audioDescr.addSSRC(GetUniqueId(), "audio", std::to_string(GetUniqueId()) + "audio");
+        audioDescr.addOpusCodec(109);
+        auto remoteAudioTrack = participant->GetConnection()->addTrack(audioDescr);
+    
+        rtc::Description::Video videoDescr(std::to_string(GetUniqueId()), rtc::Description::Direction::SendOnly);
+        videoDescr.addSSRC(GetUniqueId(), "video", std::to_string(GetUniqueId()) + "video");
+        videoDescr.addVP8Codec(120);
+        videoDescr.setBitrate(3000);
+        auto remoteVideoTrack = participant->GetConnection()->addTrack(videoDescr);
 
-        other->AddRemoteTrack(newClientId, remoteTrack);
+        other->AddRemoteTracks(newClientId, {remoteAudioTrack, remoteVideoTrack});
     }
+
     participant->GetConnection()->setLocalDescription(rtc::Description::Type::Offer);
 }
 
-void Room::HandleTrackForParticipant(ClientId clientId, const std::shared_ptr<rtc::Track>& track) {
+void Room::HandleTracksForParticipant(ClientId clientId, const std::array<std::shared_ptr<rtc::Track>, 2> tracks) {
     auto& participant = Participants_.at(clientId);
 
-    participant->SetAudioTrack(track);
+    participant->SetTracks(tracks);
     for (auto [id, other] : Participants_) {
         if (id == clientId) {
             continue;
         }
 
-        std::cout << "Adding track from participant " << clientId << " to participant " << id << std::endl;
+        std::cout << "Adding tracks from participant " << clientId << " to participant " << id << std::endl;
 
-        rtc::Description::Audio descr(std::to_string(clientId * 10000 + id), rtc::Description::Direction::SendOnly);
-        descr.addOpusCodec(109);
-        descr.addSSRC(clientId, {}, {});
-        auto remoteTrack = other->GetConnection()->addTrack(descr);
+        rtc::Description::Audio audioDescr(std::to_string(GetUniqueId()), rtc::Description::Direction::SendOnly);
+        audioDescr.addSSRC(GetUniqueId(), "audio", std::to_string(GetUniqueId()) + "audio");
+        audioDescr.addOpusCodec(109);
+        auto remoteAudioTrack = other->GetConnection()->addTrack(audioDescr);
+    
+        rtc::Description::Video videoDescr(std::to_string(GetUniqueId()), rtc::Description::Direction::SendOnly);
+        videoDescr.addSSRC(GetUniqueId(), "video", std::to_string(GetUniqueId()) + "video");
+        videoDescr.addVP8Codec(120);
+        videoDescr.setBitrate(3000);
+        auto remoteVideoTrack = other->GetConnection()->addTrack(videoDescr);
+
         other->GetConnection()->setLocalDescription(rtc::Description::Type::Offer);
 
-        participant->AddRemoteTrack(id, remoteTrack);
+        participant->AddRemoteTracks(id, {remoteAudioTrack, remoteVideoTrack});
+    }
+
+    for (auto [id, participant] : Participants_) {
+        participant->GetTracks()[1]->requestKeyframe();
     }
 }
 
@@ -58,18 +76,22 @@ void Room::RemoveParticipant(ClientId clientId) {
     }
 
     std::cout << "Removing participant " << clientId << " from the room" << std::endl;
+    Participants_[clientId]->CloseRemoteTracks();
 
-    for (auto& [id, participant] : Participants_) {
+    for (auto& [id, other] : Participants_) {
         if (id == clientId) {
             continue;
         }
 
         std::cout << "Removing track from " << id << " to " << clientId << std::endl;
 
-        participant->RemoveRemoteTrack(clientId);
+        other->RemoveRemoteTracks(clientId);
+        other->GetConnection()->setLocalDescription(rtc::Description::Type::Offer);
     }
 
-    Participants_.at(clientId)->GetAudioTrack()->close();
+    for (auto& track : Participants_.at(clientId)->GetTracks()) {
+        track->close();
+    }
     Participants_.erase(clientId);
 }
 

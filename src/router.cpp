@@ -2,6 +2,7 @@
 
 #include "loop.hpp"
 #include "participant.hpp"
+#include "rtc/rtpdepacketizer.hpp"
 #include "utils.hpp"
 
 #include <rtc/description.hpp>
@@ -19,15 +20,20 @@
 namespace sfu {
 
 struct Client {
-    std::optional<RoomId> roomId;
+    std::optional<ClientId> ClientId;
+    std::optional<RoomId> RoomId;
     std::shared_ptr<rtc::WebSocket> ws;
     std::shared_ptr<rtc::PeerConnection> pc;
     std::string ErrorMessage;
+    bool IsVideoActive = false;
 
-    std::shared_ptr<rtc::Track> track;
+    std::array<std::shared_ptr<rtc::Track>, 2> Tracks;
 };
 
 namespace {
+
+constexpr std::string_view AUDIO = "0";
+constexpr std::string_view VIDEO = "1";
 
 using json = nlohmann::json;
 
@@ -55,11 +61,18 @@ std::optional<std::tuple<uint64_t, uint64_t>> ValidateOffer(const json& offer, s
             return {};
         }
 
-        return std::make_tuple(decoded.get_payload_claim("user_id").as_integer(), decoded.get_payload_claim("room").as_integer());
+        auto roomId = decoded.get_payload_claim("room").as_integer();
+        auto clientId = decoded.get_payload_claim("user_id").as_integer();
+        if (roomId <= 0 || clientId <= 0) {
+            client->ErrorMessage = "Invalid room or user id";
+            return {};
+        }
+
+        return std::make_tuple(clientId, roomId);
     } catch (const jwt::error::token_verification_exception& ex) {
-        client->ErrorMessage  = (std::string("Verification failed: ") + ex.what());
+        client->ErrorMessage = (std::string("Verification failed: ") + ex.what());
     } catch (const std::exception& ex) {
-        client->ErrorMessage  = ex.what();
+        client->ErrorMessage = ex.what();
     }
    
     return {};
@@ -80,12 +93,9 @@ Router::Router()
 void Router::WsOpenCallback(std::shared_ptr<rtc::WebSocket> ws) {
     Loop_->EnqueueTask([this, ws = std::move(ws)]
     {
-        auto id = IdGenerator_++;
         auto client = std::make_shared<Client>();
-        Clients_.emplace(id, client);
+        Clients_.emplace(client);
         client->ws = ws;
-
-        std::cout << "[Client " << id << "] WebSocket connected" << std::endl;
     });
 }
 
@@ -93,27 +103,25 @@ void Router::WsClosedCallback(std::shared_ptr<rtc::WebSocket> ws) {
     Loop_->EnqueueTask([this, ws = std::move(ws)]
     {
         std::shared_ptr<Client> clientToClose;
-        uint32_t idToClose;
         {
             for (auto it = Clients_.begin(); it != Clients_.end(); ++it) {
-                if (it->second->ws == ws) {
-                    clientToClose = it->second;
-                    idToClose = it->first;
-                    Clients_.erase(it);
+                if ((*it)->ws == ws) {
+                    clientToClose = *it;
                     break;
                 }
             }
         }
 
         if (clientToClose) {
-            std::cout << "[Client " << idToClose << "] WebSocket disconnected" << std::endl;
-            if (clientToClose->roomId) {
-                Rooms_.at(*clientToClose->roomId).RemoveParticipant(idToClose);
+            if (clientToClose->RoomId) {
+                std::cout << "[Client " << *clientToClose->ClientId << "] WebSocket disconnected" << std::endl;
+                Rooms_.at(*clientToClose->RoomId).RemoveParticipant(*clientToClose->ClientId);
             }
 
             if (clientToClose->pc) {
                 clientToClose->pc->close();
             }
+            Clients_.erase(clientToClose);
         }
     });
 }
@@ -133,12 +141,10 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         }
 
         std::shared_ptr<Client> client;
-        uint64_t clientId;
         {
-            for (auto& [id, c] : Clients_) {
+            for (auto& c : Clients_) {
                 if (c->ws == ws) {
                     client = c;
-                    clientId = id;
                     break;
                 }
             }
@@ -151,19 +157,45 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
 
         auto typeIt = j.find("type");
         if (typeIt == j.end() || !typeIt->is_string()) {
-            std::cerr << "[Client " << clientId << "] Signaling message missing type" << std::endl;
+            std::cerr << "Signaling message missing type" << std::endl;
             ws->close();
             return;
         }
 
-        const std::string type = *typeIt;
-        std::cout << "[Client " << clientId << "] Received signaling: " << type << std::endl;
+        const auto& type = *typeIt;
+
+        if (type != "offer" && (!client->ClientId || !client->RoomId)) {
+            std::cerr << "Invalid message type" << std::endl;
+            ws->close();
+            return;
+        }
 
         if (type == "offer") {
             auto validationResult = ValidateOffer(j, client, PublicKey_);
 
+            if (!validationResult) {
+                ws->send(client->ErrorMessage);
+                ws->close();
+                return;
+            }
+
+            auto [clientId, roomId] = *validationResult;
+
+            if (Rooms_.contains(roomId) && Rooms_[roomId].HasParticipant(clientId)) {
+                Rooms_[roomId].RemoveParticipant(clientId);
+                for (auto it = Clients_.begin(); it != Clients_.end(); ++it) {
+                    if ((*it)->ClientId == clientId) {
+                        client->ws->close();
+                        break;
+                    }
+                }
+            }
+
+            client->ClientId = clientId;
+            client->RoomId = roomId; 
+
             if (!j.contains("sdp")) {
-                std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
+                std::cerr << "Offer missing sdp" << std::endl;
                 ws->close();
                 return;
             }
@@ -188,16 +220,9 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                         {"type", desc.typeString()},
                         {"sdp", std::string(desc)}
                     };
-                    if (!client->ErrorMessage.empty()) {
-                        answer["error"] = client->ErrorMessage;
-                    }
 
                     std::cout << "[Client " << clientId << "] Sending answer" << std::endl;
                     ws->send(answer.dump());
-                    if (!client->ErrorMessage.empty()) {
-                        std::cerr << client->ErrorMessage << "\n";
-                        ws->close();
-                    }
                 });
 
                 if (!client->ErrorMessage.empty()) {
@@ -233,32 +258,29 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
                     Loop_->EnqueueTask([this, client, clientId, track] {
                         auto session = std::make_shared<rtc::RtcpReceivingSession>();
                         track->setMediaHandler(session);
-                        client->track = track;
+
+                        std::cout << track->mid() << "\n";
+                        if (track->mid() == AUDIO) {
+                            client->Tracks[0] = track;
+                            return;
+                        }
+
+                        client->Tracks[1] = track;
                     });
                 });
 
-                client->pc->onStateChange([this, client, clientId](rtc::PeerConnection::State state) {
-                    Loop_->EnqueueTask([this, client, clientId, state] {
+                client->pc->onStateChange([this, client](rtc::PeerConnection::State state) {
+                    Loop_->EnqueueTask([this, client, state] {
                         if (state == rtc::PeerConnection::State::Connected) {
-                            if (Rooms_.at(*client->roomId).HasParticipant(clientId)) {
-                                return;
-                            }
+                            std::cout << "[Client " << *client->ClientId << "Connected to room: " << *client->RoomId << "\n";
 
-                            std::cout << "[Client " << clientId << "Connected to room: " << *client->roomId << "\n";
-
-                            auto newParticipant = std::make_shared<Participant>(client->pc, clientId);
-                            Rooms_.at(*client->roomId).AddParticipant(clientId, newParticipant);
-                            std::cout << "Handle track for client: " << clientId << "\n";
-                            Rooms_.at(*client->roomId).HandleTrackForParticipant(clientId, client->track);
+                            auto newParticipant = std::make_shared<Participant>(client->pc, *client->ClientId);
+                            Rooms_[*client->RoomId].AddParticipant(*client->ClientId, newParticipant);
+                            std::cout << "Handle tracks for client: " << *client->ClientId << "\n";
+                            Rooms_[*client->RoomId].HandleTracksForParticipant(*client->ClientId, client->Tracks);
                         }
                     });
                 });
-            }
-
-            auto [_, roomId] = *validationResult;
-            client->roomId = roomId;
-            if (!Rooms_.count(*client->roomId)) {
-                Rooms_.emplace(*client->roomId, Room{});
             }
 
             std::cout << "[Client " << clientId << "] Processing offer..." << std::endl;
@@ -272,7 +294,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         else if (type == "answer") {
             auto sdpIt = j.find("sdp");
             if (sdpIt == j.end() || !sdpIt->is_string()) {
-                std::cerr << "[Client " << clientId << "] Offer missing sdp" << std::endl;
+                std::cerr << "[Client " << *client->ClientId << "] Offer missing sdp" << std::endl;
                 return;
             }
             client->pc->setRemoteDescription(rtc::Description(std::string(*sdpIt), "answer"));
@@ -280,7 +302,7 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
         else if (type == "candidate") {
             auto candIt = j.find("candidate");
             if (candIt == j.end() || !candIt->is_string()) {
-                std::cerr << "[Client " << clientId << "] Candidate message missing candidate field" << std::endl;
+                std::cerr << "[Client " << *client->ClientId << "] Candidate message missing candidate field" << std::endl;
                 return;
             }
 
@@ -288,31 +310,54 @@ void Router::WsOnMessageCallback(std::shared_ptr<rtc::WebSocket> ws, rtc::messag
             
             // Skip empty candidates
             if (candidate.empty()) {
-                std::cout << "[Client " << clientId << "] Skipping empty candidate" << std::endl;
+                std::cout << "[Client " << *client->ClientId << "] Skipping empty candidate" << std::endl;
                 return;
             }
 
             std::string sdpMid = j.value("sdpMid", "");
             
-            std::cout << "[Client " << clientId << "] Adding remote candidate: " << candidate << std::endl;
+            std::cout << "[Client " << *client->ClientId << "] Adding remote candidate: " << candidate << std::endl;
 
             if (client->pc) {
                 try {
                     client->pc->addRemoteCandidate(rtc::Candidate(candidate, sdpMid));
-                    std::cout << "[Client " << clientId << "] ✓ Candidate added successfully" << std::endl;
+                    std::cout << "[Client " << *client->ClientId << "] ✓ Candidate added successfully" << std::endl;
                 } catch (const std::exception& e) {
-                    std::cerr << "[Client " << clientId << "] Failed to add candidate: " << e.what() << std::endl;
+                    std::cerr << "[Client " << *client->ClientId << "] Failed to add candidate: " << e.what() << std::endl;
+                }
+            }
+        }
+        else if (type == "mode") {
+            auto& room = Rooms_[*client->RoomId];
+            bool isActive = j["active"].get<bool>();
+
+            client->IsVideoActive = isActive;
+
+            const auto& participants = room.GetParticipants();
+            const auto& outgoingTracks = participants.at(*client->ClientId)->GetOutgoingTracks();
+            for (auto& other : Clients_) {
+                if (other == client) {
+                    continue;
+                }
+
+                if (auto it = outgoingTracks.find(*other->ClientId); it != outgoingTracks.cend()) {
+                    other->ws->send(
+                        json{
+                            {"type", "mode"},
+                            {"ssrc", outgoingTracks.at(*other->ClientId)[1]->description().getSSRCs()[0] },
+                            {"active", isActive}
+                        }.dump());
                 }
             }
         }
         else if (type == "endOfCandidates") {
-            std::cout << "[Client " << clientId << "] Client finished sending candidates" << std::endl;
+            std::cout << "[Client " << *client->ClientId << "] Client finished sending candidates" << std::endl;
         }
         else if (type == "ping") {
             ws->send(json({{"type","pong"}}).dump());
         }
         else {
-            std::cout << "[Client " << clientId << "] Unknown message type: " << type << std::endl;
+            std::cout << "[Client " << *client->ClientId << "] Unknown message type: " << type << std::endl;
         }
     });
 }
